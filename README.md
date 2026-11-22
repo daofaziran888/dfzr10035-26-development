@@ -73,6 +73,44 @@ npm run dev
 | 用量计费 | `cost_account` | 用量账单 | 账单编号、提供方、计费周期 |
 | 任务调度 | `task_schedule` | 调度计划 | 计划编号、关联端点、Cron表达式 |
 
+## 采集续跑（响应解析缺字段续跑投递）
+
+`backend/app/services/resume_delivery.py` + `backend/app/routers/resume.py` 承载
+「响应解析异常 → 缺字段续跑 → 投递待办 → 接收确认 → 补齐重定位」全链路，
+独立于通用 CRUD 资源路由，固定前缀 `/api/resume`（先于 `/api/{module}` 挂载）。
+
+核心规则：
+
+- 显式 `null` 与路径缺失严格区分：映射 `allow_null` 时显式 null 原样保留并视为已核验；
+  JSON 路径找不到的行记入解析问题清单（留存原响应行与未通过字段），核验前不得按零额交付。
+- 续跑明细随可交付数据写入投递待办；阻断行不进待办。
+- 字段补录只把新就绪行放入「下一次投递」待办，不隐式立即发出；原始响应行永不被改写，
+  补录记录带原请求编号 + 原响应行号定位坐标，全部状态变化写入只增不改的事件日志。
+- 启动/重试投递只发未确认行，已确认/已拒收行任何情况下不重复投递；确认回执幂等（重复确认只回原回执）。
+- 接收方可拒收在途行并记录原因；拒收行不再自动投递、不能再确认，接收方视图与运维视图均可追溯。
+- 接收确认结果同步回解析问题清单；全部行核验并到达终态（已确认/已拒收）后请求自动置为「投递完成」。
+
+| 端点 | 作用 |
+| --- | --- |
+| `POST /api/resume/intake` | 解析一次采集响应，产续跑明细/投递待办/问题清单 |
+| `POST /api/resume/requests/{rn}/start` | 启动投递，实际发出待投递且未确认的行 |
+| `POST /api/resume/requests/{rn}/interrupt` | 标记投递中断 |
+| `POST /api/resume/requests/{rn}/retry` | 中断重试，重发在途/待投递行，排除已确认/已拒收行 |
+| `POST /api/resume/requests/{rn}/rows/{row}/acknowledge` | 接收方确认（幂等，回执唯一） |
+| `POST /api/resume/requests/{rn}/rows/{row}/reject` | 接收方拒收（必填原因），拒收行不再自动投递 |
+| `POST /api/resume/requests/{rn}/rows/{row}/supplement` | 按原请求+原响应行补交字段，核验后进下一次投递待办 |
+| `GET /api/resume/requests/{rn}/receiver-results` | 接收方视图：确认/未确认/拒收行、null 字段与回执 |
+| `GET /api/resume/requests/{rn}/ops-view` | 运维视图：异常行、缺字段、补录记录、重试次数、最终状态与事件轨迹 |
+| `GET /api/resume/requests/{rn}/parse-issues` | 解析问题清单：原响应行、缺字段、补齐历史 |
+| `POST /api/resume/requests/{rn}/reset` | 清除单请求链路数据（测试/重跑隔离） |
+
+端到端验证脚本（A 缺 amount / B amount=null / C amount=8 的完整时序）：
+
+```bash
+# 先启动后端，再跑真实 HTTP 链路；也可加 --in-process 直接驱动领域服务
+python3 -I verification/verify_resume_delivery.py
+```
+
 ## 约定
 
 - 全部模块共享`frontend/src/views/WorkbenchView.vue|tsx`和一套资源路由。
